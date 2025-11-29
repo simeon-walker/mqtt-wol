@@ -1,0 +1,10 @@
+mqtt-wol:
+  image: mqtt-wol
+  container_name: mqtt-wol
+  network_mode: host
+  restart: unless-stopped
+  environment:
+    MQTT_ADDR: tcp://192.168.1.5:1883
+    MQTT_USER: myuser
+    MQTT_PASS: mypassword
+    MQTT_TOPIC: wol/trigger
