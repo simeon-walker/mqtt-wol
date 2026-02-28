@@ -12,18 +12,11 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-RUN go build -o mqtt-wol .
+ENV CGO_ENABLED=0
+RUN go build -ldflags="-s -w" -o mqtt-wol .
 
 # Final stage
-FROM alpine
-RUN apk add --no-cache ca-certificates
-
-WORKDIR /app
-
-# Copy binary from builder
-COPY --from=builder /build/mqtt-wol /usr/local/bin/mqtt-wol
-
-# Ensure binary is executable
-RUN chmod +x /usr/local/bin/mqtt-wol
-
-ENTRYPOINT ["mqtt-wol"]
+FROM scratch
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /build/mqtt-wol /mqtt-wol
+ENTRYPOINT ["/mqtt-wol"]
