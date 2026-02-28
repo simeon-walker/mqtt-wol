@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"log/slog"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
@@ -29,47 +33,76 @@ func main() {
 		topic = "wol/trigger"
 	}
 
-	// ----- MQTT connect -----
+	// ----- MQTT options -----
 	opts := mqtt.NewClientOptions().
 		AddBroker(mqttAddr).
-		SetClientID("wol-agent")
+		SetClientID("wol-agent").
+		SetAutoReconnect(true).
+		SetConnectRetry(true).
+		SetConnectRetryInterval(5 * time.Second).
+		SetKeepAlive(30 * time.Second).
+		SetPingTimeout(10 * time.Second)
 
 	if mqttUser != "" {
 		opts.SetUsername(mqttUser)
 		opts.SetPassword(mqttPass)
 	}
 
+	// ----- Re-subscribe on every connect -----
+	opts.OnConnect = func(c mqtt.Client) {
+		slog.Info("Connected", "broker", mqttAddr)
+
+		token := c.Subscribe(topic, 0, msgHandler)
+		token.Wait()
+		if token.Error() != nil {
+			slog.Error("Subscribe failed", "error", token.Error())
+		} else {
+			slog.Info("Subscribed", "topic", topic)
+		}
+	}
+
+	opts.OnConnectionLost = func(_ mqtt.Client, err error) {
+		slog.Warn("Connection lost", "error", err)
+	}
+
+	// ----- Connect -----
 	client := mqtt.NewClient(opts)
-	if token := client.Connect(); token.Wait() && token.Error() != nil {
+	token := client.Connect()
+	token.Wait()
+	if token.Error() != nil {
 		log.Fatal(token.Error())
 	}
 
-	slog.Info("Connected", "broker", mqttAddr)
-	slog.Info("Listening", "topic", "wol/trigger")
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	client.Subscribe("wol/trigger", 0, func(_ mqtt.Client, msg mqtt.Message) {
-		var m Msg
-		if err := json.Unmarshal(msg.Payload(), &m); err != nil {
-			slog.Error("Invalid JSON payload", "error", err)
-			return
-		}
+	<-ctx.Done()
+	slog.Info("Shutting down...")
 
-		mac := strings.ToUpper(strings.TrimSpace(m.MAC))
-		slog.Info("Received WOL request", "mac", mac)
+	client.Disconnect(250) // ms to wait for in-flight messages
+}
 
-		pkt, err := NewMagicPacket(mac)
-		if err != nil {
-			slog.Error("Invalid MAC", "error", err)
-			return
-		}
+// ----- Message handler -----
+func msgHandler(_ mqtt.Client, msg mqtt.Message) {
+	var m Msg
+	if err := json.Unmarshal(msg.Payload(), &m); err != nil {
+		slog.Error("Invalid JSON payload", "error", err)
+		return
+	}
 
-		// Send broadcast to port 9
-		if err := pkt.Send("255.255.255.255:9"); err != nil {
-			slog.Error("Sending", "error", err)
-		} else {
-			slog.Info("WOL sent", "mac", mac)
-		}
-	})
+	mac := strings.ToUpper(strings.TrimSpace(m.MAC))
+	slog.Info("Received WOL request", "mac", mac)
 
-	select {} // block forever
+	pkt, err := NewMagicPacket(mac)
+	if err != nil {
+		slog.Error("Invalid MAC", "error", err)
+		return
+	}
+
+	// Send broadcast to port 9
+	if err := pkt.Send("255.255.255.255:9"); err != nil {
+		slog.Error("Sending", "error", err)
+	} else {
+		slog.Info("WOL sent", "mac", mac)
+	}
 }
